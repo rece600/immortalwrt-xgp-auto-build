@@ -24,7 +24,7 @@ jobs:
         run: |
           set -euo pipefail
           git fetch --force --tags origin
-          git checkout --detach "$XGP_RELEASE_TAG"
+          git checkout "$XGP_RELEASE_TAG"
           echo "Using XGP build tag: $XGP_RELEASE_TAG"
 
       - name: Set up build environment
