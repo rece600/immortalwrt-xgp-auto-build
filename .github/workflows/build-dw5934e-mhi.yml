@@ -1,16 +1,53 @@
 
+name: Build DW5934e MHI driver
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - ".github/workflows/build-dw5934e-mhi.yml"
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout XGP build scripts
+        uses: actions/checkout@v4
+        with:
+          repository: zzzz0317/immortalwrt-xgp-auto-build
+          ref: main
+          submodules: recursive
+
+      - name: Install build dependencies
+        run: sudo ./install-env.sh
+
+      - name: Prepare source tree
+        run: ./prepare.sh
+
+      - name: Configure MHI PCIe driver
+        shell: bash
+        run: |
+          set -e
+          echo 'CONFIG_PACKAGE_kmod-mhi-pci-generic=m' >> xgp.config
+
+      - name: Build firmware packages
+        run: ./build.sh
+
       - name: Collect driver packages
         shell: bash
         run: |
-          set -euo pipefail
+          set -e
           mkdir -p output
           find . -type f \( \
             -name '*mhi*pci*generic*.apk' -o \
-            -name '*mhi*pci*generic*.ipk' -o \
-            -name '*mhi*wwan*.apk' -o \
-            -name '*mhi*wwan*.ipk' -o \
-            -name 'kmod-mhi-bus*.apk' -o \
-            -name 'kmod-mhi-bus*.ipk' \
+            -name '*mhi*pci*generic*.ipk' \
           \) -not -path './output/*' -exec cp -v {} output/ \;
-          echo "Collected packages:"
-          find output -maxdepth 1 -type f -print
+          find output -type f -print
+          test -n "$(find output -type f -print -quit)"
+
+      - name: Upload driver packages
+        uses: actions/upload-artifact@v4
+        with:
+          name: dw5934e-mhi-driver
+          path: output/*
+          if-no-files-found: error
