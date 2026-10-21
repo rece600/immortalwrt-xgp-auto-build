@@ -1,0 +1,114 @@
+name: Build DW5934e MHI for installed XGPv3 firmware
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+    env:
+      TZ: Asia/Shanghai
+      # ImmortalWrt source revision recorded in release v0.261009.091418
+      IMMORTALWRT_COMMIT: 89dfac46c9f1eaeb56c6cf49eb289b4475f446f7
+      XGP_RELEASE_TAG: v0.261009.091418
+    steps:
+      - name: Checkout build scripts
+        uses: actions/checkout@v4
+
+      - name: Select exact XGPv3 release source/config
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch --force --tags origin
+          git checkout --detach "$XGP_RELEASE_TAG"
+          echo "Using XGP build tag: $XGP_RELEASE_TAG"
+
+      - name: Set up build environment
+        run: sudo ./install-env.sh
+
+      - name: Prepare OpenWrt tree and feeds
+        run: ./prepare.sh
+
+      - name: Pin ImmortalWrt source to installed firmware revision
+        shell: bash
+        run: |
+          set -euo pipefail
+          git -C immortalwrt fetch origin "$IMMORTALWRT_COMMIT"
+          git -C immortalwrt checkout --detach "$IMMORTALWRT_COMMIT"
+          test "$(git -C immortalwrt rev-parse HEAD)" = "$IMMORTALWRT_COMMIT"
+          echo "Pinned ImmortalWrt to $IMMORTALWRT_COMMIT"
+
+      - name: Enable DW5934e MHI/WWAN packages
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path("xgp.config")
+          lines = p.read_text().splitlines()
+          packages = [
+              "kmod-mhi-pci-generic",
+              "kmod-mhi-wwan-ctrl",
+              "kmod-mhi-wwan-mbim",
+              "kmod-wwan",
+              "kmod-qrtr-mhi",
+          ]
+          for package in packages:
+              key = f"CONFIG_PACKAGE_{package}"
+              lines = [
+                  line for line in lines
+                  if not line.startswith(key + "=")
+                  and line != f"# {key} is not set"
+              ]
+              lines.append(key + "=y")
+          p.write_text("\n".join(lines) + "\n")
+          print("\n".join(line for line in lines if any(
+              f"CONFIG_PACKAGE_{pkg}=" in line for pkg in packages
+          )))
+          PY
+
+      - name: Build XGPv3 firmware and MHI packages
+        run: ./build.sh
+
+      - name: Collect MHI packages and build evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p release_assets/mhi-packages release_assets/build-info release_assets/modules
+          find immortalwrt/bin -type f \( \
+            -name '*mhi*.apk' -o -name '*mhi*.ipk' -o \
+            -name '*wwan*.apk' -o -name '*wwan*.ipk' \
+          \) -exec cp -v {} release_assets/mhi-packages/ \;
+          # Also extract the main PCIe module for convenient inspection.
+          while IFS= read -r pkg; do
+            work="$(mktemp -d)"
+            if tar -xf "$pkg" -C "$work" 2>/dev/null && [ -f "$work/data.tar.gz" ]; then
+              mkdir -p "$work/root"
+              tar -xzf "$work/data.tar.gz" -C "$work/root"
+              find "$work/root" -type f -name 'mhi_pci_generic.ko' -exec cp -v {} release_assets/modules/ \;
+            fi
+            rm -rf "$work"
+          done < <(find immortalwrt/bin -type f -name 'kmod-mhi-pci-generic*.apk' -print)
+          cp immortalwrt/bin/targets/rockchip/armv8/version.buildinfo release_assets/build-info/ 2>/dev/null || true
+          cp immortalwrt/bin/targets/rockchip/armv8/config.buildinfo release_assets/build-info/ 2>/dev/null || true
+          cp immortalwrt/bin/targets/rockchip/armv8/feeds.buildinfo release_assets/build-info/ 2>/dev/null || true
+          printf 'xgp_release_tag=%s\nimmortalwrt_commit=%s\n' "$XGP_RELEASE_TAG" "$IMMORTALWRT_COMMIT" > release_assets/build-info/source-pins.txt
+          echo "Built packages:"
+          find release_assets/mhi-packages -maxdepth 1 -type f -printf '%f\n'
+          test -n "$(find release_assets/mhi-packages -type f -print -quit)" || {
+            echo "No MHI/WWAN package was produced; inspect the build log." >&2
+            exit 1
+          }
+
+      - name: Upload compiled packages
+        uses: actions/upload-artifact@v4
+        with:
+          name: dw5934e-xgpv3-mhi-kernel-packages
+          path: release_assets/
+          if-no-files-found: error
+          retention-days: 14
+
