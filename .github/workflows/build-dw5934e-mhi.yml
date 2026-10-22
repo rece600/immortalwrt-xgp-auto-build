@@ -7,9 +7,18 @@ on:
     paths:
       - ".github/workflows/build-dw5934e-mhi.yml"
 
+permissions:
+  contents: read
+
 jobs:
   build:
     runs-on: ubuntu-24.04
+    timeout-minutes: 360
+
+    env:
+      IMMORTALWRT_COMMIT: 89dfac46c9f1eaeb56c6cf49eb289b4475f446f7
+      EXPECTED_KERNEL_ABI: 6.12.108~e199e4b734490b2de5e16f714589bf5a-r1
+
     steps:
       - name: Checkout XGP build scripts
         uses: actions/checkout@v4
@@ -21,33 +30,63 @@ jobs:
       - name: Install build dependencies
         run: sudo ./install-env.sh
 
-      - name: Prepare source tree
+      - name: Prepare source and feeds
         run: ./prepare.sh
 
-      - name: Configure MHI PCIe driver
+      - name: Pin source to the firmware release
         shell: bash
         run: |
-          set -e
-          echo 'CONFIG_PACKAGE_kmod-mhi-pci-generic=m' >> xgp.config
+          set -euo pipefail
+          git -C immortalwrt fetch --depth=1 origin "$IMMORTALWRT_COMMIT"
+          git -C immortalwrt checkout --detach "$IMMORTALWRT_COMMIT"
+          test "$(git -C immortalwrt rev-parse HEAD)" = "$IMMORTALWRT_COMMIT"
+          git -C immortalwrt log -1 --oneline
 
-      - name: Build firmware packages
-        run: ./build.sh
-
-      - name: Collect driver packages
+      - name: Configure driver
         shell: bash
         run: |
-          set -e
+          set -euo pipefail
+          grep -q '^CONFIG_PACKAGE_kmod-mhi-pci-generic=m$' xgp.config || \
+            echo 'CONFIG_PACKAGE_kmod-mhi-pci-generic=m' >> xgp.config
+          cat xgp.config > immortalwrt/.config
+          cd immortalwrt
+          make defconfig
+
+      - name: Build kernel modules
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd immortalwrt
+          make package/kernel/linux/compile V=s
+
+      - name: Verify exact router ABI
+        shell: bash
+        run: |
+          set -euo pipefail
           mkdir -p output
-          find . -type f \( \
-            -name '*mhi*pci*generic*.apk' -o \
-            -name '*mhi*pci*generic*.ipk' \
-          \) -not -path './output/*' -exec cp -v {} output/ \;
-          find output -type f -print
-          test -n "$(find output -type f -print -quit)"
+          find immortalwrt/bin/packages -type f \
+            \( -name 'kmod-mhi-pci-generic-*.apk' \
+               -o -name 'kmod-mhi-pci-generic_*.ipk' \) \
+            -exec cp -v {} output/ \;
 
-      - name: Upload driver packages
+          package="$(find output -type f -print -quit)"
+          test -n "$package" || {
+            echo "ERROR: driver package was not produced"
+            exit 1
+          }
+
+          echo "Package: $package"
+          tar -xzOf "$package" .PKGINFO | tee output/package-info.txt
+
+          grep -Fq "$EXPECTED_KERNEL_ABI" output/package-info.txt || {
+            echo "ERROR: kernel ABI does not match the router."
+            echo "Expected: $EXPECTED_KERNEL_ABI"
+            exit 1
+          }
+
+      - name: Upload verified driver
         uses: actions/upload-artifact@v4
         with:
-          name: dw5934e-mhi-driver
+          name: dw5934e-mhi-driver-matching-abi
           path: output/*
           if-no-files-found: error
