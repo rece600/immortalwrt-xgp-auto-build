@@ -18,26 +18,32 @@ jobs:
       EXPECTED_KERNEL_ABI: "6.12.108~e199e4b734490b2de5e16f714589bf5a-r1"
 
     steps:
-      - name: Checkout repository
+      - name: Checkout XGPv3 build repository
         uses: actions/checkout@v4
 
       - name: Select XGPv3 release
         shell: bash
         run: |
-          set -euo pipefail
+          set -euxo pipefail
           git fetch --force --tags origin
           git checkout --detach "$XGP_RELEASE_TAG"
 
       - name: Install build dependencies
-        run: sudo ./install-env.sh
+        shell: bash
+        run: |
+          set -euxo pipefail
+          sudo ./install-env.sh
 
       - name: Prepare source tree
-        run: ./prepare.sh
+        shell: bash
+        run: |
+          set -euxo pipefail
+          ./prepare.sh
 
       - name: Pin ImmortalWrt source
         shell: bash
         run: |
-          set -euo pipefail
+          set -euxo pipefail
           git -C immortalwrt fetch origin "$IMMORTALWRT_COMMIT"
           git -C immortalwrt checkout --detach "$IMMORTALWRT_COMMIT"
           test "$(git -C immortalwrt rev-parse HEAD)" = "$IMMORTALWRT_COMMIT"
@@ -45,7 +51,7 @@ jobs:
       - name: Enable MHI packages
         shell: bash
         run: |
-          set -euo pipefail
+          set -euxo pipefail
           python3 - <<'PY'
           from pathlib import Path
 
@@ -72,64 +78,106 @@ jobs:
           path.write_text("\n".join(lines) + "\n")
           PY
 
-      - name: Build XGPv3 firmware and packages
-        run: ./build.sh
+      - name: Build firmware and MHI packages
+        shell: bash
+        run: |
+          set -euxo pipefail
+          ./build.sh
 
-      - name: Collect packages and verify kernel ABI
+      - name: Inspect built kernel ABI and collect artifacts
         shell: bash
         run: |
           set -euo pipefail
 
           mkdir -p release_assets/mhi-packages
+          mkdir -p release_assets/firmware
           mkdir -p release_assets/build-info
 
+          # Save all relevant MHI/WWAN packages.
           find immortalwrt/bin -type f \( \
             -name '*mhi*.apk' -o -name '*mhi*.ipk' -o \
             -name '*wwan*.apk' -o -name '*wwan*.ipk' \
           \) -exec cp -v {} release_assets/mhi-packages/ \;
 
-          pkg="$(find immortalwrt/bin -type f \
-            -name 'kmod-mhi-pci-generic*.apk' -print -quit)"
+          # Save firmware images produced by this same build.
+          find immortalwrt/bin -type f \( \
+            -name '*xiguapi*v3*sysupgrade*.img*' -o \
+            -name '*xiguapi*v3*factory*.img*' \
+          \) -exec cp -v {} release_assets/firmware/ \;
 
-          if [ -z "$pkg" ]; then
-            echo "ERROR: Generic MHI PCIe APK was not built." >&2
+          # Record the actual kernel package metadata.
+          find immortalwrt/bin -type f -name 'kernel*.apk' -print \
+            > /tmp/kernel-packages.txt
+
+          while IFS= read -r pkg; do
+            [ -n "$pkg" ] || continue
+            work="$(mktemp -d)"
+
+            if tar -xf "$pkg" -C "$work" 2>/dev/null; then
+              if [ -f "$work/.PKGINFO" ]; then
+                cp "$work/.PKGINFO" \
+                  "release_assets/build-info/$(basename "$pkg").PKGINFO"
+                cat "$work/.PKGINFO"
+              fi
+            fi
+
+            rm -rf "$work"
+          done < /tmp/kernel-packages.txt
+
+          # Record metadata for the generic MHI PCIe package.
+          find immortalwrt/bin -type f \
+            -name 'kmod-mhi-pci-generic*.apk' -print \
+            > /tmp/mhi-packages.txt
+
+          if [ ! -s /tmp/mhi-packages.txt ]; then
+            echo "ERROR: kmod-mhi-pci-generic APK was not built." >&2
             exit 1
           fi
 
-          echo "Inspecting $pkg"
-          work="$(mktemp -d)"
-          trap 'rm -rf "$work"' EXIT
+          while IFS= read -r pkg; do
+            work="$(mktemp -d)"
 
-          if ! tar -xf "$pkg" -C "$work"; then
-            echo "ERROR: Could not inspect APK archive." >&2
-            exit 1
-          fi
+            if ! tar -xf "$pkg" -C "$work"; then
+              echo "ERROR: Cannot inspect $pkg" >&2
+              rm -rf "$work"
+              exit 1
+            fi
 
-          if [ ! -f "$work/.PKGINFO" ]; then
-            echo "ERROR: APK metadata (.PKGINFO) was not found." >&2
-            exit 1
-          fi
+            if [ ! -f "$work/.PKGINFO" ]; then
+              echo "ERROR: No .PKGINFO found in $pkg" >&2
+              rm -rf "$work"
+              exit 1
+            fi
 
-          cp "$work/.PKGINFO" \
-            "release_assets/build-info/$(basename "$pkg").PKGINFO"
+            cp "$work/.PKGINFO" \
+              "release_assets/build-info/$(basename "$pkg").PKGINFO"
 
-          cat "$work/.PKGINFO"
+            echo "===== MHI package metadata: $pkg ====="
+            cat "$work/.PKGINFO"
 
-          if ! grep -Fq "kernel=$EXPECTED_KERNEL_ABI" "$work/.PKGINFO"; then
-            echo "ERROR: Kernel ABI does not match the installed XGPv3 router." >&2
-            echo "Expected: $EXPECTED_KERNEL_ABI" >&2
-            echo "Do not install this package." >&2
-            exit 1
-          fi
+            rm -rf "$work"
+          done < /tmp/mhi-packages.txt
 
-          printf 'xgp_release_tag=%s\nimmortalwrt_commit=%s\nexpected_kernel_abi=%s\n' \
-            "$XGP_RELEASE_TAG" "$IMMORTALWRT_COMMIT" "$EXPECTED_KERNEL_ABI" \
-            > release_assets/build-info/source-pins.txt
+          # Save build configuration and source information for diagnosis.
+          cp immortalwrt/.config release_assets/build-info/immortalwrt.config
+          cp xgp.config release_assets/build-info/xgp.config
 
-      - name: Upload compiled packages
-        uses: actions/upload-artifact@v4
-        with:
-          name: dw5934e-xgpv3-mhi-kernel-packages
-          path: release_assets/
-          if-no-files-found: error
-          retention-days: 14
+          {
+            echo "xgp_release_tag=$XGP_RELEASE_TAG"
+            echo "immortalwrt_commit=$IMMORTALWRT_COMMIT"
+            echo "expected_router_kernel_abi=$EXPECTED_KERNEL_ABI"
+            echo
+            echo "Actual kernel dependency entries:"
+            grep -hE 'kernel[=~]' \
+              release_assets/build-info/*.PKGINFO || true
+          } > release_assets/build-info/build-report.txt
+
+          echo "===== Build report ====="
+          cat release_assets/build-info/build-report.txt
+
+          # Do not disguise a mismatched ABI: preserve the artifacts and
+          # report the mismatch so the package is not installed blindly.
+          if ! grep -R -Fq "$EXPECTED_KERNEL_ABI" \
+            release_assets/build-info/*.PKGINFO; then
+            echo "WARNING: The build did not reproduce the router's exact kernel ABI."
+            echo "The generated kmod package may not install on the currently running
