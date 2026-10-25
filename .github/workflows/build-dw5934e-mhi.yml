@@ -1,35 +1,71 @@
-```yaml
 name: Build DW5934e MHI Driver
 
 on:
   workflow_dispatch:
-
-permissions:
-  contents: read
+  push:
+    paths:
+      - ".github/workflows/build-dw5934e-mhi.yml"
 
 jobs:
   build:
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
 
     steps:
-      - name: Checkout repository
+      - name: Checkout XGP build scripts
         uses: actions/checkout@v4
+        with:
+          repository: zzzz0317/immortalwrt-xgp-auto-build
+          ref: v0.261009.091418
+          submodules: recursive
 
-      - name: Show workflow files
+      - name: Install build dependencies
+        run: sudo ./install-env.sh
+
+      - name: Prepare source tree
+        run: ./prepare.sh
+
+      - name: Verify kernel version
         shell: bash
         run: |
           set -euo pipefail
-          echo "===== REPOSITORY ====="
-          pwd
-          ls -la
-          echo "===== WORKFLOW ====="
-          cat .github/workflows/build-dw5934e-mhi.yml
+          cd immortalwrt
+          echo "Checking target kernel version..."
+          grep -nE 'LINUX_VERSION(-6\.12)?[[:space:]]*=' include/kernel-6.12 || true
+          if ! grep -Eq 'LINUX_VERSION-6\.12[[:space:]]*=[[:space:]]*\.108([[:space:]]|$)' include/kernel-6.12; then
+            echo "ERROR: Source does not specify Linux 6.12.108."
+            echo "Stopping to prevent building an incompatible driver."
+            exit 1
+          fi
+          echo "Kernel version check passed."
 
-      - name: Stop until matching kernel source is configured
+      - name: Enable MHI PCIe driver
         shell: bash
         run: |
-          echo "No driver build performed."
-          echo "The ImmortalWrt source checkout and kernel configuration"
-          echo "must match the router's Linux 6.12.108 build."
-          exit 1
-```
+          set -euo pipefail
+          echo 'CONFIG_PACKAGE_kmod-mhi-pci-generic=m' >> xgp.config
+
+      - name: Build firmware packages
+        run: ./build.sh
+
+      - name: Collect driver packages
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p output
+          find . -type f \( \
+            -name '*mhi*pci*generic*.apk' -o \
+            -name '*mhi*pci*generic*.ipk' \
+          \) -not -path './output/*' -exec cp -v {} output/ \;
+          if ! find output -type f -print -quit | grep -q .; then
+            echo "ERROR: No MHI PCIe driver package was produced."
+            exit 1
+          fi
+          echo "Driver packages:"
+          find output -type f -print
+
+      - name: Upload driver package
+        uses: actions/upload-artifact@v4
+        with:
+          name: dw5934e-mhi-driver
+          path: output/*
+          if-no-files-found: error
