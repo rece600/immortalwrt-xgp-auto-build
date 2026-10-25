@@ -15,6 +15,7 @@ jobs:
       TZ: Asia/Shanghai
       IMMORTALWRT_COMMIT: 89dfac46c9f1eaeb56c6cf49eb289b4475f446f7
       XGP_RELEASE_TAG: v0.261009.091418
+      EXPECTED_KERNEL_ABI: "6.12.108~e199e4b734490b2de5e16f714589bf5a-r1"
 
     steps:
       - name: Checkout repository
@@ -74,7 +75,7 @@ jobs:
       - name: Build XGPv3 firmware and packages
         run: ./build.sh
 
-      - name: Collect MHI packages
+      - name: Collect packages and verify kernel ABI
         shell: bash
         run: |
           set -euo pipefail
@@ -87,32 +88,42 @@ jobs:
             -name '*wwan*.apk' -o -name '*wwan*.ipk' \
           \) -exec cp -v {} release_assets/mhi-packages/ \;
 
-          find immortalwrt/bin -type f \
-            -name 'kmod-mhi-pci-generic*.apk' -print \
-            > /tmp/mhi-packages.txt
+          pkg="$(find immortalwrt/bin -type f \
+            -name 'kmod-mhi-pci-generic*.apk' -print -quit)"
 
-          if [ ! -s /tmp/mhi-packages.txt ]; then
-            echo "ERROR: No generic MHI PCIe package was built." >&2
+          if [ -z "$pkg" ]; then
+            echo "ERROR: Generic MHI PCIe APK was not built." >&2
             exit 1
           fi
 
-          while IFS= read -r pkg; do
-            echo "Package metadata: $pkg"
-            work="$(mktemp -d)"
+          echo "Inspecting $pkg"
+          work="$(mktemp -d)"
+          trap 'rm -rf "$work"' EXIT
 
-            if tar -xf "$pkg" -C "$work" 2>/dev/null; then
-              if [ -f "$work/.PKGINFO" ]; then
-                cp "$work/.PKGINFO" \
-                  "release_assets/build-info/$(basename "$pkg").PKGINFO"
-                cat "$work/.PKGINFO"
-              fi
-            fi
+          if ! tar -xf "$pkg" -C "$work"; then
+            echo "ERROR: Could not inspect APK archive." >&2
+            exit 1
+          fi
 
-            rm -rf "$work"
-          done < /tmp/mhi-packages.txt
+          if [ ! -f "$work/.PKGINFO" ]; then
+            echo "ERROR: APK metadata (.PKGINFO) was not found." >&2
+            exit 1
+          fi
 
-          printf 'xgp_release_tag=%s\nimmortalwrt_commit=%s\n' \
-            "$XGP_RELEASE_TAG" "$IMMORTALWRT_COMMIT" \
+          cp "$work/.PKGINFO" \
+            "release_assets/build-info/$(basename "$pkg").PKGINFO"
+
+          cat "$work/.PKGINFO"
+
+          if ! grep -Fq "kernel=$EXPECTED_KERNEL_ABI" "$work/.PKGINFO"; then
+            echo "ERROR: Kernel ABI does not match the installed XGPv3 router." >&2
+            echo "Expected: $EXPECTED_KERNEL_ABI" >&2
+            echo "Do not install this package." >&2
+            exit 1
+          fi
+
+          printf 'xgp_release_tag=%s\nimmortalwrt_commit=%s\nexpected_kernel_abi=%s\n' \
+            "$XGP_RELEASE_TAG" "$IMMORTALWRT_COMMIT" "$EXPECTED_KERNEL_ABI" \
             > release_assets/build-info/source-pins.txt
 
       - name: Upload compiled packages
