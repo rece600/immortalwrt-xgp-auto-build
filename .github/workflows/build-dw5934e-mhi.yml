@@ -12,7 +12,7 @@ jobs:
 
     steps:
       - name: Checkout XGP build scripts
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           repository: zzzz0317/immortalwrt-xgp-auto-build
           ref: v0.261009.091418
@@ -21,22 +21,48 @@ jobs:
       - name: Install build dependencies
         run: sudo ./install-env.sh
 
+      - name: Pin kernel source to installed firmware revision
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+
+          p = Path("prepare.sh")
+          s = p.read_text()
+
+          old = '    git clone -b openwrt-25.12 --single-branch --filter=blob:none "https://github.com/immortalwrt/immortalwrt" || { echo "git clone failed"; exit 1; }'
+          new = old + '\n    git -C immortalwrt checkout 89dfac46c9f1eaeb56c6cf49eb289b4475f446f7'
+
+          if old not in s:
+              raise SystemExit("ERROR: Could not locate the source clone command in prepare.sh.")
+
+          p.write_text(s.replace(old, new, 1))
+          print("Pinned ImmortalWrt source to the firmware revision.")
+          PY
+
       - name: Prepare source tree
         run: ./prepare.sh
 
-      - name: Verify kernel version
+      - name: Verify kernel version and source
         shell: bash
         run: |
           set -euo pipefail
           cd immortalwrt
-          echo "Checking target kernel version..."
-          grep -nE 'LINUX_VERSION(-6\.12)?[[:space:]]*=' include/kernel-6.12 || true
-          if ! grep -Eq 'LINUX_VERSION-6\.12[[:space:]]*=[[:space:]]*\.108([[:space:]]|$)' include/kernel-6.12; then
-            echo "ERROR: Source does not specify Linux 6.12.108."
-            echo "Stopping to prevent building an incompatible driver."
-            exit 1
-          fi
-          echo "Kernel version check passed."
+
+          EXPECTED_COMMIT="89dfac46c9f1eaeb56c6cf49eb289b4475f446f7"
+          ACTUAL_COMMIT="$(git rev-parse HEAD)"
+
+          echo "Source commit: $ACTUAL_COMMIT"
+          test "$ACTUAL_COMMIT" = "$EXPECTED_COMMIT"
+
+          KERNEL_FILE="target/linux/generic/kernel-6.12"
+          test -f "$KERNEL_FILE"
+
+          grep -Fqx 'LINUX_VERSION-6.12 = .108' "$KERNEL_FILE"
+          grep -Fqx 'LINUX_KERNEL_HASH-6.12.108 = e1d1ea200d22d55c9f5d5fae59e69bb3b494515705fc3390cd54231ee4f4baaf' "$KERNEL_FILE"
+
+          echo "Verified source revision and Linux kernel 6.12.108."
 
       - name: Enable MHI PCIe driver
         shell: bash
@@ -52,15 +78,18 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p output
+
           find . -type f \( \
             -name '*mhi*pci*generic*.apk' -o \
             -name '*mhi*pci*generic*.ipk' \
           \) -not -path './output/*' -exec cp -v {} output/ \;
+
           if ! find output -type f -print -quit | grep -q .; then
             echo "ERROR: No MHI PCIe driver package was produced."
             exit 1
           fi
-          echo "Driver packages:"
+
+          echo "Packages produced:"
           find output -type f -print
 
       - name: Upload driver package
