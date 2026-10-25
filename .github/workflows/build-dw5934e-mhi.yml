@@ -1,26 +1,35 @@
-      - name: Build and verify DW5934e driver
+```yaml
+name: Build DW5934e MHI Driver
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Show workflow files
         shell: bash
         run: |
           set -euo pipefail
-          cd immortalwrt
+          echo "===== REPOSITORY ====="
+          pwd
+          ls -la
+          echo "===== WORKFLOW ====="
+          cat .github/workflows/build-dw5934e-mhi.yml
 
-          echo "===== KERNEL VERSION ====="
-          grep -R -n 'LINUX_VERSION' target/linux/rockchip/Makefile include/kernel-6.12.mk 2>/dev/null || true
-
-          echo "===== BUILD HOST UTILITY ====="
-          make tools/libdeflate/compile V=s
-          test -x staging_dir/host/bin/libdeflate-gzip
-
-          echo "===== BUILD KERNEL PACKAGE ====="
-          make package/kernel/linux/compile V=s
-
-          echo "===== COLLECT DRIVER PACKAGE ====="
-          mkdir -p ../output
-          find bin/packages -type f \
-            \( -name 'kmod-mhi-pci-generic-*.apk' \
-               -o -name 'kmod-mhi-pci-generic_*.ipk' \) \
-            -exec cp -v {} ../output/ \;
-
-          echo "===== VERIFY OUTPUT ====="
-          find ../output -maxdepth 1 -type f -ls
-          test -n "$(find ../output -type f -print -quit)"
+      - name: Stop until matching kernel source is configured
+        shell: bash
+        run: |
+          echo "No driver build performed."
+          echo "The ImmortalWrt source checkout and kernel configuration"
+          echo "must match the router's Linux 6.12.108 build."
+          exit 1
+```
