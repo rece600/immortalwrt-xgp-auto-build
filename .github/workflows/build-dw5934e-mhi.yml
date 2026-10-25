@@ -1,22 +1,17 @@
-```yaml
       - name: Build and verify DW5934e driver
         shell: bash
         run: |
           set -euo pipefail
           cd immortalwrt
 
-          echo "===== VERIFY KERNEL SOURCE ====="
-          grep -R -n 'LINUX_VERSION-6.12' \
-            target/linux/rockchip include/kernel-6.12.mk 2>/dev/null || true
-
-          echo "===== VERIFY GENERIC MHI CONFIG ====="
-          grep -E 'CONFIG_MHI_BUS|CONFIG_MHI_BUS_PCI_GENERIC' .config || true
+          echo "===== KERNEL VERSION ====="
+          grep -R -n 'LINUX_VERSION' target/linux/rockchip/Makefile include/kernel-6.12.mk 2>/dev/null || true
 
           echo "===== BUILD HOST UTILITY ====="
           make tools/libdeflate/compile V=s
           test -x staging_dir/host/bin/libdeflate-gzip
 
-          echo "===== BUILD KERNEL MODULE PACKAGES ====="
+          echo "===== BUILD KERNEL PACKAGE ====="
           make package/kernel/linux/compile V=s
 
           echo "===== COLLECT DRIVER PACKAGE ====="
@@ -29,4 +24,3 @@
           echo "===== VERIFY OUTPUT ====="
           find ../output -maxdepth 1 -type f -ls
           test -n "$(find ../output -type f -print -quit)"
-```
