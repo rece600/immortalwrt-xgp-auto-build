@@ -1,4 +1,3 @@
-```yaml
 name: Build DW5934e MHI for XGPv3
 
 on:
@@ -16,10 +15,9 @@ jobs:
       TZ: Asia/Shanghai
       IMMORTALWRT_COMMIT: 89dfac46c9f1eaeb56c6cf49eb289b4475f446f7
       XGP_RELEASE_TAG: v0.261009.091418
-      EXPECTED_KERNEL_ABI: "6.12.108~e199e4b734490b2de5e16f714589bf5a-r1"
 
     steps:
-      - name: Checkout XGPv3 build scripts
+      - name: Checkout repository
         uses: actions/checkout@v4
 
       - name: Select XGPv3 release
@@ -28,7 +26,6 @@ jobs:
           set -euo pipefail
           git fetch --force --tags origin
           git checkout --detach "$XGP_RELEASE_TAG"
-          echo "XGP release: $XGP_RELEASE_TAG"
 
       - name: Install build dependencies
         run: sudo ./install-env.sh
@@ -43,29 +40,85 @@ jobs:
           git -C immortalwrt fetch origin "$IMMORTALWRT_COMMIT"
           git -C immortalwrt checkout --detach "$IMMORTALWRT_COMMIT"
           test "$(git -C immortalwrt rev-parse HEAD)" = "$IMMORTALWRT_COMMIT"
-          echo "ImmortalWrt source: $(git -C immortalwrt rev-parse HEAD)"
 
-      - name: Verify original XGPv3 configuration
+      - name: Enable MHI packages
         shell: bash
         run: |
           set -euo pipefail
-          test -f xgp.config
-          echo "Using the release's original xgp.config."
-          sha256sum xgp.config
+          python3 - <<'PY'
+          from pathlib import Path
+
+          path = Path("xgp.config")
+          lines = path.read_text().splitlines()
+
+          packages = [
+              "kmod-mhi-pci-generic",
+              "kmod-mhi-wwan-ctrl",
+              "kmod-mhi-wwan-mbim",
+              "kmod-wwan",
+              "kmod-qrtr-mhi",
+          ]
+
+          for package in packages:
+              key = f"CONFIG_PACKAGE_{package}"
+              lines = [
+                  line for line in lines
+                  if not line.startswith(key + "=")
+                  and line != f"# {key} is not set"
+              ]
+              lines.append(f"{key}=y")
+
+          path.write_text("\n".join(lines) + "\n")
+          PY
 
       - name: Build XGPv3 firmware and packages
         run: ./build.sh
 
-      - name: Collect packages and build evidence
+      - name: Collect MHI packages
         shell: bash
         run: |
           set -euo pipefail
 
           mkdir -p release_assets/mhi-packages
           mkdir -p release_assets/build-info
-          mkdir -p release_assets/modules
 
           find immortalwrt/bin -type f \( \
             -name '*mhi*.apk' -o -name '*mhi*.ipk' -o \
             -name '*wwan*.apk' -o -name '*wwan*.ipk' \
-          \) -exec cp -v
+          \) -exec cp -v {} release_assets/mhi-packages/ \;
+
+          find immortalwrt/bin -type f \
+            -name 'kmod-mhi-pci-generic*.apk' -print \
+            > /tmp/mhi-packages.txt
+
+          if [ ! -s /tmp/mhi-packages.txt ]; then
+            echo "ERROR: No generic MHI PCIe package was built." >&2
+            exit 1
+          fi
+
+          while IFS= read -r pkg; do
+            echo "Package metadata: $pkg"
+            work="$(mktemp -d)"
+
+            if tar -xf "$pkg" -C "$work" 2>/dev/null; then
+              if [ -f "$work/.PKGINFO" ]; then
+                cp "$work/.PKGINFO" \
+                  "release_assets/build-info/$(basename "$pkg").PKGINFO"
+                cat "$work/.PKGINFO"
+              fi
+            fi
+
+            rm -rf "$work"
+          done < /tmp/mhi-packages.txt
+
+          printf 'xgp_release_tag=%s\nimmortalwrt_commit=%s\n' \
+            "$XGP_RELEASE_TAG" "$IMMORTALWRT_COMMIT" \
+            > release_assets/build-info/source-pins.txt
+
+      - name: Upload compiled packages
+        uses: actions/upload-artifact@v4
+        with:
+          name: dw5934e-xgpv3-mhi-kernel-packages
+          path: release_assets/
+          if-no-files-found: error
+          retention-days: 14
