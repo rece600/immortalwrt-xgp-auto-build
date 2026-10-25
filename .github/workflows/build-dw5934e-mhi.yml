@@ -1,24 +1,32 @@
-
+```yaml
       - name: Build and verify DW5934e driver
         shell: bash
         run: |
           set -euo pipefail
           cd immortalwrt
 
-          # Build the host utility that the log says is missing.
-          make tools/libdeflate/clean
-          make tools/libdeflate/compile V=s
+          echo "===== VERIFY KERNEL SOURCE ====="
+          grep -R -n 'LINUX_VERSION-6.12' \
+            target/linux/rockchip include/kernel-6.12.mk 2>/dev/null || true
 
+          echo "===== VERIFY GENERIC MHI CONFIG ====="
+          grep -E 'CONFIG_MHI_BUS|CONFIG_MHI_BUS_PCI_GENERIC' .config || true
+
+          echo "===== BUILD HOST UTILITY ====="
+          make tools/libdeflate/compile V=s
           test -x staging_dir/host/bin/libdeflate-gzip
 
-          # Build the kernel package target.
+          echo "===== BUILD KERNEL MODULE PACKAGES ====="
           make package/kernel/linux/compile V=s
 
-          # Collect the actual driver package.
+          echo "===== COLLECT DRIVER PACKAGE ====="
           mkdir -p ../output
           find bin/packages -type f \
             \( -name 'kmod-mhi-pci-generic-*.apk' \
                -o -name 'kmod-mhi-pci-generic_*.ipk' \) \
             -exec cp -v {} ../output/ \;
 
+          echo "===== VERIFY OUTPUT ====="
+          find ../output -maxdepth 1 -type f -ls
           test -n "$(find ../output -type f -print -quit)"
+```
