@@ -1,4 +1,4 @@
-name: Build DW5934e MHI for XGPv3
+name: Build DW5934e MHI Driver Only
 
 on:
   workflow_dispatch:
@@ -7,14 +7,14 @@ permissions:
   contents: read
 
 jobs:
-  build:
+  build-driver:
     runs-on: ubuntu-24.04
     timeout-minutes: 360
 
     env:
       TZ: Asia/Shanghai
-      IMMORTALWRT_COMMIT: 89dfac46c9f1eaeb56c6cf49eb289b4475f446f7
       XGP_RELEASE_TAG: v0.261009.092258
+      IMMORTALWRT_COMMIT: 89dfac46c9f1eaeb56c6cf49eb289b4475f446f7
       EXPECTED_KERNEL_ABI: "6.12.108~e199e4b734490b2de5e16f714589bf5a-r1"
 
     steps:
@@ -46,9 +46,10 @@ jobs:
           set -euxo pipefail
           git -C immortalwrt fetch origin "$IMMORTALWRT_COMMIT"
           git -C immortalwrt checkout --detach "$IMMORTALWRT_COMMIT"
+
           test "$(git -C immortalwrt rev-parse HEAD)" = "$IMMORTALWRT_COMMIT"
 
-      - name: Enable MHI packages
+      - name: Enable required MHI packages
         shell: bash
         run: |
           set -euxo pipefail
@@ -73,111 +74,72 @@ jobs:
                   if not line.startswith(key + "=")
                   and line != f"# {key} is not set"
               ]
-              lines.append(f"{key}=y")
+              lines.append(f"{key}=m")
 
           path.write_text("\n".join(lines) + "\n")
           PY
 
-      - name: Build firmware and MHI packages
+      - name: Configure build
         shell: bash
         run: |
           set -euxo pipefail
-          ./build.sh
+          cd immortalwrt
+          cp ../xgp.config .config
+          make defconfig
 
-      - name: Inspect built kernel ABI and collect artifacts
+      - name: Build kernel and required modules only
+        shell: bash
+        run: |
+          set -euxo pipefail
+          cd immortalwrt
+
+          make -j"$(nproc)" target/linux/compile
+          make -j"$(nproc)" package/kernel/linux/compile
+
+      - name: Collect driver packages and metadata
         shell: bash
         run: |
           set -euo pipefail
 
-          mkdir -p release_assets/mhi-packages
-          mkdir -p release_assets/firmware
+          mkdir -p release_assets/packages
           mkdir -p release_assets/build-info
 
-          # Save all relevant MHI/WWAN packages.
           find immortalwrt/bin -type f \( \
-            -name '*mhi*.apk' -o -name '*mhi*.ipk' -o \
-            -name '*wwan*.apk' -o -name '*wwan*.ipk' \
-          \) -exec cp -v {} release_assets/mhi-packages/ \;
+            -name 'kmod-mhi-pci-generic*.apk' -o \
+            -name 'kmod-mhi-wwan-ctrl*.apk' -o \
+            -name 'kmod-mhi-wwan-mbim*.apk' -o \
+            -name 'kmod-mhi-bus*.apk' -o \
+            -name 'kmod-mhi-net*.apk' -o \
+            -name 'kmod-qrtr-mhi*.apk' -o \
+            -name 'kmod-wwan*.apk' \
+          \) -exec cp -v {} release_assets/packages/ \;
 
-          # Save firmware images produced by this same build.
-          find immortalwrt/bin -type f \( \
-            -name '*xiguapi*v3*sysupgrade*.img*' -o \
-            -name '*xiguapi*v3*factory*.img*' \
-          \) -exec cp -v {} release_assets/firmware/ \;
+          driver="$(find release_assets/packages -type f \
+            -name 'kmod-mhi-pci-generic*.apk' -print -quit)"
 
-          # Record the actual kernel package metadata.
-          find immortalwrt/bin -type f -name 'kernel*.apk' -print \
-            > /tmp/kernel-packages.txt
-
-          while IFS= read -r pkg; do
-            [ -n "$pkg" ] || continue
-            work="$(mktemp -d)"
-
-            if tar -xf "$pkg" -C "$work" 2>/dev/null; then
-              if [ -f "$work/.PKGINFO" ]; then
-                cp "$work/.PKGINFO" \
-                  "release_assets/build-info/$(basename "$pkg").PKGINFO"
-                cat "$work/.PKGINFO"
-              fi
-            fi
-
-            rm -rf "$work"
-          done < /tmp/kernel-packages.txt
-
-          # Record metadata for the generic MHI PCIe package.
-          find immortalwrt/bin -type f \
-            -name 'kmod-mhi-pci-generic*.apk' -print \
-            > /tmp/mhi-packages.txt
-
-          if [ ! -s /tmp/mhi-packages.txt ]; then
-            echo "ERROR: kmod-mhi-pci-generic APK was not built." >&2
+          if [ -z "$driver" ]; then
+            echo "ERROR: Driver APK was not produced." >&2
             exit 1
           fi
 
-          while IFS= read -r pkg; do
-            work="$(mktemp -d)"
-
-            if ! tar -xf "$pkg" -C "$work"; then
-              echo "ERROR: Cannot inspect $pkg" >&2
-              rm -rf "$work"
-              exit 1
-            fi
-
-            if [ ! -f "$work/.PKGINFO" ]; then
-              echo "ERROR: No .PKGINFO found in $pkg" >&2
-              rm -rf "$work"
-              exit 1
-            fi
-
-            cp "$work/.PKGINFO" \
-              "release_assets/build-info/$(basename "$pkg").PKGINFO"
-
-            echo "===== MHI package metadata: $pkg ====="
-            cat "$work/.PKGINFO"
-
-            rm -rf "$work"
-          done < /tmp/mhi-packages.txt
-
-          # Save build configuration and source information for diagnosis.
           cp immortalwrt/.config release_assets/build-info/immortalwrt.config
-          cp xgp.config release_assets/build-info/xgp.config
 
           {
-            echo "xgp_release_tag=$XGP_RELEASE_TAG"
-            echo "immortalwrt_commit=$IMMORTALWRT_COMMIT"
-            echo "expected_router_kernel_abi=$EXPECTED_KERNEL_ABI"
+            echo "XGP release: $XGP_RELEASE_TAG"
+            echo "ImmortalWrt commit: $IMMORTALWRT_COMMIT"
+            echo "Expected router ABI: $EXPECTED_KERNEL_ABI"
             echo
-            echo "Actual kernel dependency entries:"
-            grep -hE 'kernel[=~]' \
-              release_assets/build-info/*.PKGINFO || true
+            echo "Driver APK: $driver"
+            sha256sum "$driver"
           } > release_assets/build-info/build-report.txt
 
-          echo "===== Build report ====="
+          echo "Built driver package:"
           cat release_assets/build-info/build-report.txt
 
-          # Do not disguise a mismatched ABI: preserve the artifacts and
-          # report the mismatch so the package is not installed blindly.
-          if ! grep -R -Fq "$EXPECTED_KERNEL_ABI" \
-            release_assets/build-info/*.PKGINFO; then
-            echo "WARNING: The build did not reproduce the router's exact kernel ABI."
-            echo "The generated kmod package may not install on the currently running
+      - name: Upload driver packages
+        uses: actions/upload-artifact@v4
+        with:
+          name: xgpv3-dw5934e-driver-only
+          path: release_assets/
+          if-no-files-found: error
+          retention-days: 14
