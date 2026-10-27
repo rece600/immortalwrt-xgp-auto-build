@@ -1,5 +1,5 @@
 
-      - name: Build kernel and required modules only
+      name: Build kernel and required modules only
         shell: bash
         run: |
           set -uo pipefail
