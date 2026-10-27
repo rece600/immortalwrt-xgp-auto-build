@@ -1,145 +1,29 @@
-name: Build DW5934e MHI Driver Only
-
-on:
-  workflow_dispatch:
-
-permissions:
-  contents: read
-
-jobs:
-  build-driver:
-    runs-on: ubuntu-24.04
-    timeout-minutes: 360
-
-    env:
-      TZ: Asia/Shanghai
-      XGP_RELEASE_TAG: v0.261009.092258
-      IMMORTALWRT_COMMIT: 89dfac46c9f1eaeb56c6cf49eb289b4475f446f7
-      EXPECTED_KERNEL_ABI: "6.12.108~e199e4b734490b2de5e16f714589bf5a-r1"
-
-    steps:
-      - name: Checkout XGPv3 build repository
-        uses: actions/checkout@v4
-
-      - name: Select XGPv3 release
-        shell: bash
-        run: |
-          set -euxo pipefail
-          git fetch --force --tags origin
-          git checkout --detach "$XGP_RELEASE_TAG"
-
-      - name: Install build dependencies
-        shell: bash
-        run: |
-          set -euxo pipefail
-          sudo ./install-env.sh
-
-      - name: Prepare source tree
-        shell: bash
-        run: |
-          set -euxo pipefail
-          ./prepare.sh
-
-      - name: Pin ImmortalWrt source
-        shell: bash
-        run: |
-          set -euxo pipefail
-          git -C immortalwrt fetch origin "$IMMORTALWRT_COMMIT"
-          git -C immortalwrt checkout --detach "$IMMORTALWRT_COMMIT"
-
-          test "$(git -C immortalwrt rev-parse HEAD)" = "$IMMORTALWRT_COMMIT"
-
-      - name: Enable required MHI packages
-        shell: bash
-        run: |
-          set -euxo pipefail
-          python3 - <<'PY'
-          from pathlib import Path
-
-          path = Path("xgp.config")
-          lines = path.read_text().splitlines()
-
-          packages = [
-              "kmod-mhi-pci-generic",
-              "kmod-mhi-wwan-ctrl",
-              "kmod-mhi-wwan-mbim",
-              "kmod-wwan",
-              "kmod-qrtr-mhi",
-          ]
-
-          for package in packages:
-              key = f"CONFIG_PACKAGE_{package}"
-              lines = [
-                  line for line in lines
-                  if not line.startswith(key + "=")
-                  and line != f"# {key} is not set"
-              ]
-              lines.append(f"{key}=m")
-
-          path.write_text("\n".join(lines) + "\n")
-          PY
-
-      - name: Configure build
-        shell: bash
-        run: |
-          set -euxo pipefail
-          cd immortalwrt
-          cp ../xgp.config .config
-          make defconfig
 
       - name: Build kernel and required modules only
         shell: bash
         run: |
-          set -euxo pipefail
+          set -uo pipefail
           cd immortalwrt
 
-          make -j"$(nproc)" target/linux/compile
-          make -j"$(nproc)" package/kernel/linux/compile
+          echo "===== Check configured target ====="
+          grep -E '^(CONFIG_TARGET|CONFIG_LINUX|CONFIG_PACKAGE_kmod-mhi)' .config || true
 
-      - name: Collect driver packages and metadata
-        shell: bash
-        run: |
-          set -euo pipefail
+          echo "===== Build kernel target with detailed logging ====="
+          set +e
+          make -j1 V=s target/linux/compile 2>&1 | tee /tmp/kernel-build.log
+          build_status=${PIPESTATUS[0]}
+          set -e
 
-          mkdir -p release_assets/packages
-          mkdir -p release_assets/build-info
+          if [ "$build_status" -ne 0 ]; then
+            echo "===== Relevant kernel build errors ====="
+            grep -n -i -E 'error:|fatal:|undefined reference|no rule to make|cannot find|failed to build|Error [0-9]' \
+              /tmp/kernel-build.log | tail -n 100 || true
 
-          find immortalwrt/bin -type f \( \
-            -name 'kmod-mhi-pci-generic*.apk' -o \
-            -name 'kmod-mhi-wwan-ctrl*.apk' -o \
-            -name 'kmod-mhi-wwan-mbim*.apk' -o \
-            -name 'kmod-mhi-bus*.apk' -o \
-            -name 'kmod-mhi-net*.apk' -o \
-            -name 'kmod-qrtr-mhi*.apk' -o \
-            -name 'kmod-wwan*.apk' \
-          \) -exec cp -v {} release_assets/packages/ \;
+            mkdir -p ../release_assets/build-info
+            cp /tmp/kernel-build.log ../release_assets/build-info/kernel-build.log
 
-          driver="$(find release_assets/packages -type f \
-            -name 'kmod-mhi-pci-generic*.apk' -print -quit)"
-
-          if [ -z "$driver" ]; then
-            echo "ERROR: Driver APK was not produced." >&2
-            exit 1
+            exit "$build_status"
           fi
 
-          cp immortalwrt/.config release_assets/build-info/immortalwrt.config
-
-          {
-            echo "XGP release: $XGP_RELEASE_TAG"
-            echo "ImmortalWrt commit: $IMMORTALWRT_COMMIT"
-            echo "Expected router ABI: $EXPECTED_KERNEL_ABI"
-            echo
-            echo "Driver APK: $driver"
-            sha256sum "$driver"
-          } > release_assets/build-info/build-report.txt
-
-          echo "Built driver package:"
-          cat release_assets/build-info/build-report.txt
-
-      - name: Upload driver packages
-        uses: actions/upload-artifact@v4
-        with:
-          name: xgpv3-dw5934e-driver-only
-          path: release_assets/
-          if-no-files-found: error
-          retention-days: 14
+          echo "===== Compile requested package ====="
+          make -j1 V=s package/kernel/linux/compile
